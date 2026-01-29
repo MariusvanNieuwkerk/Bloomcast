@@ -1,0 +1,6 @@
+.venv/
+.pycache/
+__pycache__/
+.pip-cache/
+out.pdf
+sales_history.csv

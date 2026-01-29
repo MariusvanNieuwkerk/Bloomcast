@@ -1,0 +1,41 @@
+{
+  "name": "BloomCast",
+  "slug": "bloomcast",
+  "description": "International-ready forecasting agent that optimizes flower & plant orders using local sales, weather, and holidays.",
+  "run_url": "https://<your-deployed-domain>/run",
+  "headers_required": [
+    "X-Taskyard-Timestamp",
+    "X-Taskyard-Idempotency-Key",
+    "X-Taskyard-Signature"
+  ],
+  "signing": {
+    "version": "v1",
+    "payload_sha256": {
+      "file": "sha256(raw_file_bytes)",
+      "text": "sha256(utf8(canonical_text)) where canonical_text = text.replace(\\r\\n,\\n).replace(\\r,\\n).strip()"
+    },
+    "message_template": "{ts}.POST./run.{job_id}.{payload_sha256}",
+    "signature_template": "v1={hex(hmac_sha256(TASKYARD_SECRET, message))}"
+  },
+  "inputs": {
+    "multipart_form_data": {
+      "required_fields": ["job_id"],
+      "optional_fields": ["completion_mode", "upload_url", "return_pdf_base64"],
+      "accepted_file_fields": ["input_file", "transcript_file"],
+      "accepted_text_fields": ["input_text", "transcript_text"],
+      "allowed_extensions": [".csv"],
+      "allowed_mime_types": ["text/csv", "text/plain", "application/vnd.ms-excel"]
+    }
+  },
+  "outputs": {
+    "content_type": "application/pdf",
+    "filename": "bloomcast_weekly_forecast.pdf"
+  },
+  "limits": {
+    "max_upload_bytes": 26214400,
+    "max_transcript_chars": 250000,
+    "max_run_seconds": 90
+  },
+  "completion_mode_default": "review"
+}
+

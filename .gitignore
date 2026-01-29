@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+.venv/
+
+# Local/generated artifacts
+out.pdf
+sales_history.csv
+
+# Workspace images (keep local, don't publish)
+Gemini_Generated_Image_*.png
+Gemini_Generated_Image_*.jpeg
