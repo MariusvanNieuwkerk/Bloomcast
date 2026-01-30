@@ -1,16 +1,14 @@
 ## BloomCast (Taskyard Agent)
 
-BloomCast is an international-ready forecasting agent that acts like an automated Category Manager for flowers & plants.
-It optimizes recommended orders using:
-- sales history (CSV)
-- local weather (mock in MVP)
-- local holidays (via `python-holidays` / pip package `holidays`)
+BloomCast **Pure Data Edition** is a deterministic forecasting agent that creates an order proposal purely from an uploaded Excel file (no weather/holiday logic).
 
-### Switch country/store in ~10 seconds
-Edit `config.py` (or use env overrides):
-- `BLOOMCAST_STORE_CITY` (e.g. `Stockholm` / `Amsterdam`)
-- `BLOOMCAST_COUNTRY_CODE` (e.g. `SE` / `NL`)
-- `BLOOMCAST_CURRENCY` (e.g. `SEK` / `EUR`)
+### Input file format (required)
+Upload an `.xlsx` file with **5 sheets**:
+1) `Config` (cols: `Setting`, `Value`) — e.g. `PEER_WEIGHT` (0.2), `BUYER_BOOST` (10)
+2) `History_Client` (cols: `Date`, `Product`, `Qty`)
+3) `History_Peers` (cols: `Date`, `Product`, `Qty`)
+4) `Current_Stock` (cols: `Product`, `StockLevel`)
+5) `Buyer_Recs` (cols: `Product`)
 
 ### Local run (API)
 
@@ -56,7 +54,7 @@ Signature:
 - `sig = hex(hmac_sha256(TASKYARD_SECRET, msg))`
 - Header value: `X-Taskyard-Signature: v1=<sig>`
 
-#### Example: generate signature (Python)
+#### Example: generate signature for an Excel file (Python)
 
 ```python
 import hashlib, hmac, time
@@ -65,9 +63,8 @@ TASKYARD_SECRET = "replace_me"
 ts = str(int(time.time()))
 job_id = "contract_id_123"
 
-text = "product_id,product_name,category,units_sold,waste_pct,stock,unit_price,currency\nP-1,Tulip,Flowering,50,5,10,7.5,EUR\n"
-canonical = text.replace("\r\n","\n").replace("\r","\n").strip()
-payload_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+with open("input.xlsx", "rb") as f:
+    payload_sha256 = hashlib.sha256(f.read()).hexdigest()
 
 msg = f"{ts}.POST./run.{job_id}.{payload_sha256}"
 sig = hmac.new(TASKYARD_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
@@ -75,7 +72,7 @@ print("X-Taskyard-Timestamp:", ts)
 print("X-Taskyard-Signature:", "v1=" + sig)
 ```
 
-#### Example curl (text input)
+#### Example curl (file input)
 
 ```bash
 curl -X POST "http://localhost:8080/run" \
@@ -85,7 +82,7 @@ curl -X POST "http://localhost:8080/run" \
   -F "job_id=<contract_id>" \
   -F "completion_mode=review" \
   -F "return_pdf_base64=true" \
-  -F "input_text=<csv-text-here>"
+  -F "input_file=@input.xlsx"
 ```
 
 ### Idempotency (MVP)

@@ -2,113 +2,113 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
-from context_engine import HolidayContext
+from data_ingestor import IngestedData, current_iso_week
 
 
 @dataclass(frozen=True)
-class Recommendation:
-    action: str
-    reasoning: str
-    recommended_order_units: int
+class ProposalRow:
+    product: str
+    base: float
+    peer_avg: float
+    peer_gap: float
+    peer_adjustment: float
+    buyer_boost: float
+    total: int
+    stock_level: float
+    breakdown: str
 
 
 class BloomCastOptimizer:
     """
-    Applies BloomCast business rules to sales data + context.
+    Pure Data Edition (deterministic):
+      1) Baseline: average client sales for current ISO week
+      2) Opportunity: if peers > client: add (peer_avg - client_avg) * PEER_WEIGHT
+      3) Trend: if in Buyer_Recs: add BUYER_BOOST
+      4) Filter: if not in Current_Stock or StockLevel == 0 -> remove
     """
 
-    def __init__(self, *, festive_keywords: Optional[set[str]] = None):
-        self.festive_keywords = festive_keywords or {
-            "tulip",
-            "hydrangea",
-            "rose",
-            "orchid",
-            "poinsettia",
-            "daffodil",
-            "sunflower",
-        }
+    def __init__(self, *, current_week: Optional[int] = None):
+        self.current_week = int(current_week) if current_week is not None else current_iso_week()
 
-    def optimize(
-        self,
-        sales_df: pd.DataFrame,
-        *,
-        weather: dict[str, Any],
-        holiday: HolidayContext,
-    ) -> pd.DataFrame:
-        df = sales_df.copy()
+    @staticmethod
+    def _avg_for_week(history_weekly: pd.DataFrame, week: int) -> Dict[str, float]:
+        """
+        history_weekly columns: Product, IsoYear, IsoWeek, Qty
+        Returns: product -> mean(Qty over IsoYear) for the given IsoWeek
+        """
+        df = history_weekly.copy()
+        df["IsoWeek"] = pd.to_numeric(df["IsoWeek"], errors="coerce").fillna(-1).astype(int)
+        df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0.0)
+        df["Product"] = df["Product"].astype(str).str.strip()
+        df = df[(df["IsoWeek"] == int(week)) & (df["Product"] != "")]
+        if df.empty:
+            return {}
+        avg = df.groupby("Product")["Qty"].mean().to_dict()
+        return {str(k): float(v) for k, v in avg.items()}
 
-        # Normalize expected numeric columns.
-        for col in ["units_sold", "waste_pct", "stock", "unit_price"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    def optimize(self, ingested: IngestedData) -> pd.DataFrame:
+        cfg = ingested.config or {}
+        peer_weight = float(cfg.get("PEER_WEIGHT", 0.2))
+        buyer_boost = float(cfg.get("BUYER_BOOST", 10.0))
 
-        def base_recommended_order(row: pd.Series) -> int:
-            # Simple baseline: aim for 10% above last period’s sales.
-            target_stock = float(row.get("units_sold", 0)) * 1.10
-            current_stock = float(row.get("stock", 0))
-            return max(0, int(math.ceil(target_stock - current_stock)))
+        client_avg_map = self._avg_for_week(ingested.history_client_weekly, self.current_week)
+        peer_avg_map = self._avg_for_week(ingested.history_peers_weekly, self.current_week)
 
-        def is_festive_relevant(row: pd.Series) -> bool:
-            category = str(row.get("category", "")).strip().lower()
-            name = str(row.get("product_name", "")).strip().lower()
-            if category == "flowering":
-                return True
-            return any(k in name for k in self.festive_keywords)
+        stock = ingested.current_stock.copy()
+        stock["Product"] = stock["Product"].astype(str).str.strip()
+        stock["StockLevel"] = pd.to_numeric(stock["StockLevel"], errors="coerce").fillna(0.0)
+        stock_map = dict(zip(stock["Product"], stock["StockLevel"]))
 
-        rec_actions: list[str] = []
-        rec_reasons: list[str] = []
-        rec_units: list[int] = []
+        buyer_set = set(ingested.buyer_recs["Product"].astype(str).str.strip().tolist())
 
-        temp = float(weather.get("temp", 0))
+        # Candidate products: union of history products (client+peers)
+        products = set(client_avg_map.keys()) | set(peer_avg_map.keys())
+        rows: list[ProposalRow] = []
 
-        for _, row in df.iterrows():
-            recommended = base_recommended_order(row)
-
-            # 1) Bleeder Rule (highest priority)
-            if float(row.get("waste_pct", 0)) > 20.0:
-                rec_actions.append("STOP")
-                rec_reasons.append("Waste too high - BloomCast Alert")
-                rec_units.append(0)
+        for product in sorted(products):
+            stock_level = float(stock_map.get(product, 0.0))
+            # Step 4: Filter
+            if stock_level <= 0.0:
                 continue
 
-            # 2) Festive Rule
-            if holiday.upcoming and is_festive_relevant(row):
-                # Stock up aggressively for seasonal uplift.
-                boosted = int(math.ceil(recommended * 1.75))
-                boosted = max(boosted, recommended + 5) if recommended > 0 else 10
-                rec_actions.append("STOCK UP")
-                if holiday.name:
-                    rec_reasons.append(f"Festive demand: {holiday.name} within {holiday.days_until} days")
-                else:
-                    rec_reasons.append("Festive demand: upcoming holiday")
-                rec_units.append(boosted)
-                continue
+            base = float(client_avg_map.get(product, 0.0))
+            peer_avg = float(peer_avg_map.get(product, 0.0))
 
-            # 3) Sunny Rule
-            category = str(row.get("category", "")).strip().lower()
-            if temp > 20.0 and category == "outdoor":
-                boosted = int(math.ceil(recommended * 1.50))
-                rec_actions.append("INCREASE 50%")
-                rec_reasons.append("Sunny Forecast")
-                rec_units.append(boosted)
-                continue
+            # Step 2: Opportunity
+            peer_gap = max(0.0, peer_avg - base)
+            peer_adjustment = peer_gap * peer_weight
 
-            # Default
-            rec_actions.append("KEEP")
-            rec_reasons.append("Stable baseline forecast")
-            rec_units.append(int(recommended))
+            # Step 3: Trend
+            boost = float(buyer_boost if product in buyer_set else 0.0)
 
-        df["recommended_order_units"] = rec_units
-        df["action"] = rec_actions
-        df["reasoning"] = rec_reasons
+            total = base + peer_adjustment + boost
+            total_int = int(max(0, math.floor(total + 0.5)))  # round-half-up to nearest integer
 
-        # Helpful derived column for reporting.
-        if "unit_price" in df.columns:
-            df["recommended_order_value"] = (df["recommended_order_units"] * df["unit_price"]).round(2)
+            breakdown = (
+                f"{base:.2f} (Base) + {peer_adjustment:.2f} (Peer Gap * {peer_weight:g}) + "
+                f"{boost:.2f} (Buyer Boost) = {total_int} Total"
+            )
 
-        return df
+            rows.append(
+                ProposalRow(
+                    product=product,
+                    base=base,
+                    peer_avg=peer_avg,
+                    peer_gap=peer_gap,
+                    peer_adjustment=peer_adjustment,
+                    buyer_boost=boost,
+                    total=total_int,
+                    stock_level=stock_level,
+                    breakdown=breakdown,
+                )
+            )
+
+        out = pd.DataFrame([r.__dict__ for r in rows])
+        if not out.empty:
+            out = out.sort_values(["total", "product"], ascending=[False, True]).reset_index(drop=True)
+        return out
 

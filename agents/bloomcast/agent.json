@@ -1,7 +1,7 @@
 {
   "name": "BloomCast",
   "slug": "bloomcast",
-  "description": "International-ready forecasting agent that optimizes flower & plant orders using local sales, weather, and holidays.",
+  "description": "BloomCast Pure Data Edition: deterministic order proposal from an uploaded Excel file (no weather/holiday logic).",
   "run_url": "https://<your-deployed-domain>/run",
   "headers_required": [
     "X-Taskyard-Timestamp",
@@ -23,8 +23,11 @@
       "optional_fields": ["completion_mode", "upload_url", "return_pdf_base64"],
       "accepted_file_fields": ["input_file", "transcript_file"],
       "accepted_text_fields": ["input_text", "transcript_text"],
-      "allowed_extensions": [".csv"],
-      "allowed_mime_types": ["text/csv", "text/plain", "application/vnd.ms-excel"]
+      "allowed_extensions": [".xlsx"],
+      "allowed_mime_types": [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel"
+      ]
     }
   },
   "outputs": {

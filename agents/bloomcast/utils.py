@@ -7,8 +7,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
-
-import requests
+from urllib.request import Request, urlopen
 
 
 def sha256_hex(data: bytes) -> str:
@@ -106,15 +105,17 @@ def upload_output_bytes(
     timeout_seconds: int = 30,
 ) -> tuple[bool, Optional[str]]:
     try:
-        r = requests.put(
+        req = Request(
             upload_url,
             data=content,
+            method="PUT",
             headers={"Content-Type": content_type},
-            timeout=timeout_seconds,
         )
-        if 200 <= r.status_code < 300:
-            return True, None
-        return False, f"Upload failed: HTTP {r.status_code}"
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            status = getattr(resp, "status", 200)
+            if 200 <= int(status) < 300:
+                return True, None
+            return False, f"Upload failed: HTTP {status}"
     except Exception as e:
         return False, f"Upload failed: {type(e).__name__}: {e}"
 

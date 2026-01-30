@@ -1,7 +1,5 @@
 pandas
-requests
-# python-holidays library (pip package name: holidays)
-holidays
+openpyxl
 fpdf
 
 # API server (Taskyard webhook spec v1)

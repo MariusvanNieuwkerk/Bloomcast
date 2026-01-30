@@ -23,6 +23,7 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25MB
 MAX_TRANSCRIPT_CHARS = 250_000  # post-cleaning (per Taskyard spec)
 TIMESTAMP_SKEW_SECONDS = 300
 CONTENT_TYPE_PDF = "application/pdf"
+ALLOWED_EXTENSIONS = {".xlsx"}
 
 app = FastAPI(title=APP_NAME, version="1.0.0")
 idempotency_cache = InMemoryIdempotencyCache(ttl_seconds=3600)
@@ -79,21 +80,29 @@ async def run(
     file_obj = input_file or transcript_file
     text_val = input_text if input_text is not None else transcript_text
 
-    input_csv_bytes: Optional[bytes] = None
+    input_xlsx_bytes: Optional[bytes] = None
 
     if file_obj is not None:
         raw = await file_obj.read()
         if len(raw) > MAX_UPLOAD_BYTES:
             return JSONResponse(status_code=413, content={"error": "Input file too large (max 25MB)"})
-        input_csv_bytes = raw
+        # Basic extension check (best-effort; Taskyard should also enforce).
+        filename = (file_obj.filename or "").lower()
+        if filename and not any(filename.endswith(ext) for ext in ALLOWED_EXTENSIONS):
+            return JSONResponse(status_code=415, content={"error": "Unsupported file type. Please upload an .xlsx file."})
+
+        input_xlsx_bytes = raw
         payload_sha256 = sha256_hex(raw)  # file hashing: raw bytes
     elif text_val is not None:
-        # For hashing, use canonicalized text per spec; for parsing CSV, use the canonical form too.
+        # Pure Data Edition expects an Excel file. (Text input is intentionally unsupported.)
         canonical = text_val.replace("\r\n", "\n").replace("\r", "\n").strip()
         if len(canonical) > MAX_TRANSCRIPT_CHARS:
             return JSONResponse(status_code=413, content={"error": "Input text too large (max 250k chars)"})
         payload_sha256 = payload_sha256_from_text(text_val)
-        input_csv_bytes = canonical.encode("utf-8")
+        return JSONResponse(
+            status_code=415,
+            content={"error": "Text input is not supported for Pure Data Edition. Please upload an .xlsx file."},
+        )
     else:
         return JSONResponse(status_code=422, content={"error": "Missing input_file/input_text"})
 
@@ -116,7 +125,10 @@ async def run(
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
     # Run core business logic
-    pdf_bytes, analysis = run_bloomcast(job_id=job_id, input_csv_bytes=input_csv_bytes)
+    if input_xlsx_bytes is None:
+        return JSONResponse(status_code=422, content={"error": "Missing input_file (.xlsx) for Pure Data Edition"})
+
+    pdf_bytes, analysis = run_bloomcast(job_id=job_id, input_xlsx_bytes=input_xlsx_bytes)
     pdf_sha = sha256_hex(pdf_bytes)
 
     storage: dict = {"upload_used": False}
