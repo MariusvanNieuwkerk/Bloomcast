@@ -11,6 +11,43 @@ from logic_engine import BloomCastOptimizer
 from utils import sha256_hex
 
 
+def _wrap_text(pdf: FPDF, text: str, max_width_mm: float) -> list[str]:
+    """
+    Basic word-wrapping using FPDF string width.
+    Returns at least one line.
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = " ".join(t.split())  # collapse whitespace
+    if not t:
+        return [""]
+
+    words = t.split(" ")
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        trial = w if not cur else f"{cur} {w}"
+        if pdf.get_string_width(trial) <= max_width_mm:
+            cur = trial
+            continue
+        if cur:
+            lines.append(cur)
+            cur = w
+            continue
+        # single word longer than width → hard split
+        chunk = ""
+        for ch in w:
+            if pdf.get_string_width(chunk + ch) <= max_width_mm:
+                chunk += ch
+            else:
+                if chunk:
+                    lines.append(chunk)
+                chunk = ch
+        cur = chunk
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
 def generate_bloomcast_pdf_report(
     *,
     optimized_df: pd.DataFrame,
@@ -34,55 +71,102 @@ def generate_bloomcast_pdf_report(
         f"Config: PEER_WEIGHT={cfg.get('PEER_WEIGHT')}  BUYER_BOOST={cfg.get('BUYER_BOOST')}",
         ln=True,
     )
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(90, 90, 90)
+    pdf.cell(0, 5, "Avail: 1 = available/leverbaar, 0 = excluded", ln=True)
+    pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
     # Recommended orders table (deterministic)
     pdf.set_font("Helvetica", "B", 12)
     pdf.cell(0, 7, "Order Proposal (Deterministic)", ln=True)
 
+    # Column widths in mm (A4 width ~210mm, margins 12mm => usable ~186mm).
     columns = [
-        ("product", 18, "Art"),
-        ("product_name", 55, "Product"),
-        ("stock_level", 14, "Avail"),
-        ("total", 16, "Proposal"),
-        ("breakdown", 0, "Calculation Breakdown"),
+        ("product", 18.0, "Art"),
+        ("product_name", 55.0, "Product"),
+        ("stock_level", 12.0, "Avail"),
+        ("total", 16.0, "Proposal"),
+        ("breakdown", 0.0, "Calculation Breakdown"),
     ]
 
-    pdf.set_font("Helvetica", "B", 9)
-    for key, width, label in columns:
-        w = width if width > 0 else 0
-        if w == 0:
-            # remaining width
-            w = 190 - sum(c[1] for c in columns if c[1] > 0)
-        pdf.cell(w, 7, label, border=1)
-    pdf.ln()
+    usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+    fixed_w = sum(w for _, w, _ in columns if w > 0)
+    remaining_w = max(40.0, usable_w - fixed_w)  # ensure breakdown stays readable
 
-    pdf.set_font("Helvetica", "", 9)
-    view = optimized_df.copy()
+    def col_width(key: str) -> float:
+        for k, w, _ in columns:
+            if k == key:
+                return remaining_w if w == 0 else w
+        return 20.0
+
+    def draw_header() -> None:
+        pdf.set_font("Helvetica", "B", 9)
+        for key, w, label in columns:
+            width = remaining_w if w == 0 else w
+            pdf.cell(width, 7, label, border=1, align="C")
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
 
     def cell_text(v: Any) -> str:
         if v is None:
             return ""
         if isinstance(v, float):
-            # Keep numeric columns neat.
             return f"{v:g}"
         return str(v)
 
+    draw_header()
+
+    line_h = 5.0
+    view = optimized_df.copy()
     for _, row in view.iterrows():
-        for key, width, _label in columns:
-            w = width if width > 0 else 0
-            if w == 0:
-                w = 190 - sum(c[1] for c in columns if c[1] > 0)
+        # Build wrapped lines for each cell
+        cell_lines: dict[str, list[str]] = {}
+        max_lines = 1
+        for key, w, _label in columns:
+            width = remaining_w if w == 0 else w
+            pad = 2.0
             text = cell_text(row.get(key, ""))
-            # Keep the table stable by truncating long text in cells (MVP).
-            if key == "breakdown":
-                max_len = 120
-            elif key == "product_name":
-                max_len = 60
+            # Wrap only for long-text cells; keep others single-line.
+            if key in {"breakdown", "product_name"}:
+                lines = _wrap_text(pdf, text, max_width_mm=max(5.0, width - pad))
             else:
-                max_len = 50
-            pdf.cell(w, 6, text[:max_len], border=1)
-        pdf.ln()
+                lines = [text]
+            cell_lines[key] = lines
+            max_lines = max(max_lines, len(lines))
+
+        row_h = line_h * max_lines
+
+        # Page break + repeat header
+        if pdf.get_y() + row_h > pdf.page_break_trigger:
+            pdf.add_page()
+            draw_header()
+
+        y0 = pdf.get_y()
+        x0 = pdf.get_x()
+
+        # Draw each cell as a rectangle with manually positioned text lines
+        for key, w, _label in columns:
+            width = remaining_w if w == 0 else w
+            x = pdf.get_x()
+            y = pdf.get_y()
+            pdf.rect(x, y, width, row_h)
+
+            lines = cell_lines.get(key, [""])
+            # Vertical padding
+            y_text = y + 1.2
+            for i, line in enumerate(lines[:max_lines]):
+                yy = y_text + i * line_h
+                if key in {"stock_level", "total"}:
+                    # Right align numbers
+                    text_w = pdf.get_string_width(line)
+                    pdf.text(x + width - 1.5 - text_w, yy + 2.7, line)
+                else:
+                    pdf.text(x + 1.5, yy + 2.7, line)
+
+            pdf.set_xy(x + width, y)
+
+        pdf.set_xy(x0, y0 + row_h)
 
     pdf.ln(2)
     pdf.set_font("Helvetica", "", 9)
