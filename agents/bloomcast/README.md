@@ -50,6 +50,13 @@ docker run -p 8080:8080 -e TASKYARD_SECRET="replace_me" bloomcast-agent
 #### Endpoint
 - `POST /run` (exact)
 
+#### Large files (input_url mode)
+If Taskyard provides large uploads via storage, it may call the agent with:
+- `input_url` (short-lived signed download URL)
+- `input_name`, `input_mime`, `input_size`
+
+BloomCast will download the file from `input_url` (HTTP GET) and then process it as usual.
+
 #### Required headers
 - `X-Taskyard-Timestamp`: unix seconds (string)
 - `X-Taskyard-Idempotency-Key`: stable per job (Taskyard uses `contract_id`)

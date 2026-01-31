@@ -20,7 +20,15 @@
   "inputs": {
     "multipart_form_data": {
       "required_fields": ["job_id"],
-      "optional_fields": ["completion_mode", "upload_url", "return_pdf_base64"],
+      "optional_fields": [
+        "completion_mode",
+        "upload_url",
+        "return_pdf_base64",
+        "input_url",
+        "input_name",
+        "input_mime",
+        "input_size"
+      ],
       "accepted_file_fields": ["input_file", "transcript_file"],
       "accepted_text_fields": ["input_text", "transcript_text"],
       "allowed_extensions": [".xlsx"],
@@ -35,7 +43,7 @@
     "filename": "bloomcast_weekly_forecast.pdf"
   },
   "limits": {
-    "max_upload_bytes": 26214400,
+    "max_upload_bytes": 262144000,
     "max_transcript_chars": 250000,
     "max_run_seconds": 90
   },
