@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from typing import Optional
 
@@ -49,6 +50,12 @@ def _validate_timestamp(ts: str) -> bool:
 
 
 def _download_bytes(url: str, *, max_bytes: int, timeout_seconds: int = 60) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"https", "http"}:
+        raise ValueError("input_url must be http(s)")
+    # Minimal SSRF guard (Taskyard storage URLs should be public https).
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("input_url hostname not allowed")
     req = Request(url, method="GET")
     with urlopen(req, timeout=timeout_seconds) as resp:
         chunks: list[bytes] = []
@@ -70,12 +77,19 @@ def _payload_sha_candidates_for_input_url(
     input_name: Optional[str],
     input_mime: Optional[str],
     input_size: Optional[int],
+    input_sha256: Optional[str] = None,
 ) -> list[str]:
     """
     Taskyard may sign either just the URL or a canonical object.
     To stay compatible with different Taskyard payload conventions, we try a small set of deterministic candidates.
     """
     candidates: list[str] = []
+
+    # 0) If Taskyard provides the file sha256 explicitly, include it.
+    if input_sha256:
+        s = input_sha256.strip().lower()
+        if len(s) == 64 and all(c in "0123456789abcdef" for c in s):
+            candidates.append(s)
 
     # 1) URL only
     candidates.append(payload_sha256_from_text(input_url))
@@ -127,11 +141,13 @@ async def run(
     input_name: Optional[str] = Form(None),
     input_mime: Optional[str] = Form(None),
     input_size: Optional[int] = Form(None),
+    input_sha256: Optional[str] = Form(None),
     # Compatibility aliases (some clients send camelCase)
     inputUrl: Optional[str] = Form(None),
     inputName: Optional[str] = Form(None),
     inputMime: Optional[str] = Form(None),
     inputSize: Optional[int] = Form(None),
+    inputSha256: Optional[str] = Form(None),
     # Optional behavior
     return_pdf_base64: Optional[bool] = Form(False),
     # Required Taskyard headers
@@ -160,6 +176,7 @@ async def run(
     input_name = input_name or inputName
     input_mime = input_mime or inputMime
     input_size = input_size if input_size is not None else inputSize
+    input_sha256 = input_sha256 or inputSha256
 
     input_xlsx_bytes: Optional[bytes] = None
     payload_sha256: Optional[str] = None
@@ -212,7 +229,11 @@ async def run(
 
         # Signature payload is derived from the URL metadata (not from file bytes).
         payload_candidates = _payload_sha_candidates_for_input_url(
-            input_url=url, input_name=input_name, input_mime=input_mime, input_size=input_size
+            input_url=url,
+            input_name=input_name,
+            input_mime=input_mime,
+            input_size=input_size,
+            input_sha256=input_sha256,
         )
         payload_sha256 = payload_candidates[0]  # default; we will verify against all
     elif text_val is not None:
@@ -243,11 +264,13 @@ async def run(
     # Verify signature (try multiple payload candidates for input_url mode).
     if input_url is not None:
         ok = False
+        url_str = input_url.strip()
         for cand in _payload_sha_candidates_for_input_url(
-            input_url=input_url.strip(),
+            input_url=url_str,
             input_name=input_name,
             input_mime=input_mime,
             input_size=input_size,
+            input_sha256=input_sha256,
         ):
             if verify_taskyard_signature(
                 secret=secret,
@@ -260,6 +283,27 @@ async def run(
             ):
                 ok = True
                 break
+
+        # If Taskyard signs using sha256(file_bytes) for input_url mode, we need to download
+        # the file to compute the correct payload hash.
+        if not ok:
+            try:
+                tmp_bytes = _download_bytes(url_str, max_bytes=MAX_UPLOAD_BYTES, timeout_seconds=90)
+                file_sha = sha256_hex(tmp_bytes)
+                if verify_taskyard_signature(
+                    secret=secret,
+                    ts=x_taskyard_timestamp,
+                    method="POST",
+                    path="/run",
+                    job_id=job_id,
+                    payload_sha256=file_sha,
+                    provided_signature_header=x_taskyard_signature,
+                ):
+                    ok = True
+                    input_xlsx_bytes = tmp_bytes
+            except Exception:
+                # Keep error surface minimal (avoid leaking details).
+                pass
     else:
         ok = verify_taskyard_signature(
             secret=secret,
