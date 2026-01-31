@@ -4,18 +4,48 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Tuple, Union
+from typing import Any, Dict, Optional, Union
 
 import pandas as pd
 
 
 @dataclass(frozen=True)
 class IngestedData:
-    config: Dict[str, float]
+    config: Dict[str, Any]
     history_client_weekly: pd.DataFrame
     history_peers_weekly: pd.DataFrame
     current_stock: pd.DataFrame
     buyer_recs: pd.DataFrame
+
+
+def _norm(s: str) -> str:
+    return str(s).strip().lower()
+
+
+def _normalize_product_value(v: Any) -> str:
+    """
+    Normalize product identifiers so different sheets match:
+    - 1234.0 -> "1234"
+    - " 1234 " -> "1234"
+    - None/NaN -> ""
+    """
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):  # type: ignore[arg-type]
+            return ""
+    except Exception:
+        pass
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float) and float(v).is_integer():
+        return str(int(v))
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
 
 
 def _to_week(df: pd.DataFrame, date_col: str = "Date") -> pd.DataFrame:
@@ -34,7 +64,7 @@ def _aggregate_qty_by_product_week(df: pd.DataFrame) -> pd.DataFrame:
     # Expected cols: Product, Qty, IsoYear, IsoWeek
     out = df.copy()
     out["Qty"] = pd.to_numeric(out["Qty"], errors="coerce").fillna(0)
-    out["Product"] = out["Product"].astype(str).str.strip()
+    out["Product"] = out["Product"].apply(_normalize_product_value)
     out = out[out["Product"] != ""]
 
     agg = (
@@ -46,14 +76,111 @@ def _aggregate_qty_by_product_week(df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
+def _find_sheet(excel: pd.ExcelFile, *, preferred: Optional[str], candidates: list[str]) -> Optional[str]:
+    sheet_names = list(excel.sheet_names)
+    sheet_map = {_norm(s): s for s in sheet_names}
+
+    if preferred:
+        pref = _norm(preferred)
+        if pref in sheet_map:
+            return sheet_map[pref]
+
+    # Exact candidates (case-insensitive)
+    for cand in candidates:
+        c = _norm(cand)
+        if c in sheet_map:
+            return sheet_map[c]
+
+    # Contains candidates
+    for s in sheet_names:
+        sn = _norm(s)
+        for cand in candidates:
+            if _norm(cand) in sn:
+                return s
+    return None
+
+
+def _read_sheet(excel_obj: Union[str, Path, BytesIO], sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(excel_obj, sheet_name=sheet_name, engine="openpyxl")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _pick_first_col(df: pd.DataFrame, aliases: list[str]) -> Optional[str]:
+    cols = list(df.columns)
+    by_norm = {_norm(c): c for c in cols}
+    for a in aliases:
+        if _norm(a) in by_norm:
+            return by_norm[_norm(a)]
+    # contains match
+    for c in cols:
+        cn = _norm(c)
+        for a in aliases:
+            if _norm(a) in cn:
+                return c
+    return None
+
+
+def _override_or_detect(df: pd.DataFrame, override: Any, aliases: list[str]) -> Optional[str]:
+    if override is not None:
+        o = str(override).strip()
+        if o and o in df.columns:
+            return o
+    return _pick_first_col(df, aliases)
+
+
+def _extract_history_long(df: pd.DataFrame, *, date_col: str, product_col: str, qty_col: str) -> pd.DataFrame:
+    out = df[[date_col, product_col, qty_col]].copy()
+    out = out.rename(columns={date_col: "Date", product_col: "Product", qty_col: "Qty"})
+    out["Product"] = out["Product"].apply(_normalize_product_value)
+    return out
+
+
+def _history_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    # Normalized columns expected: Date, Product, Qty
+    weekly = _aggregate_qty_by_product_week(_to_week(df, "Date"))
+    return weekly
+
+
+def _build_stock_from_assortment(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    # Try to convert an assortment sheet into (Product, StockLevel) as an "availability" proxy.
+    product_col = _pick_first_col(df, ["Product", "Artikel", "Artikel nr", "Artikelnr", "Artikelnummer", "Omschrijving"])
+    if not product_col:
+        return None
+
+    leverbaar_col = _pick_first_col(df, ["Leverbaar", "Available", "Beschikbaar"])
+    stock_col = _pick_first_col(df, ["StockLevel", "Stock", "Voorraad", "Voorraadniveau"])
+
+    out = pd.DataFrame()
+    out["Product"] = df[product_col].apply(_normalize_product_value)
+    out = out[out["Product"] != ""]
+
+    if stock_col:
+        out["StockLevel"] = pd.to_numeric(df[stock_col], errors="coerce").fillna(0.0)
+        return out[["Product", "StockLevel"]].reset_index(drop=True)
+
+    if leverbaar_col:
+        # Convert WAAR/TRUE/1 to 1, else 0
+        s = df[leverbaar_col]
+        if s.dtype == bool:
+            out["StockLevel"] = s.astype(int)
+        else:
+            out["StockLevel"] = s.astype(str).str.strip().str.lower().isin(["waar", "true", "1", "yes", "ja"]).astype(int)
+        return out[["Product", "StockLevel"]].reset_index(drop=True)
+
+    return None
+
+
 def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     """
-    Ingest the client Excel file with 5 sheets:
-      1) Config (Setting, Value) -> PEER_WEIGHT, BUYER_BOOST, ...
-      2) History_Client (Date, Product, Qty)
-      3) History_Peers (Date, Product, Qty)
-      4) Current_Stock (Product, StockLevel)
-      5) Buyer_Recs (Product)
+    Ingest client Excel in either of these shapes:
+
+    A) Template format (recommended)
+      - Config, History_Client, History_Peers, Current_Stock, Buyer_Recs
+
+    B) Existing ERP/Export formats (best-effort autodetect)
+      - e.g. Dutch sheet names like 'klanthistorie', 'Historie andere klanten', 'Aanbevolen assortiment'
+      - and Dutch columns like 'Orderdatum', 'Artikel', 'Aantal', 'Leverbaar'
 
     Action:
       - Convert dates to ISO Week Numbers
@@ -65,72 +192,126 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     else:
         excel_obj = filepath
 
-    # Read Config
-    cfg_df = pd.read_excel(excel_obj, sheet_name="Config", engine="openpyxl")
-    cfg_df.columns = [str(c).strip() for c in cfg_df.columns]
-    cfg_df = cfg_df.rename(columns={"setting": "Setting", "value": "Value"})
+    excel = pd.ExcelFile(excel_obj, engine="openpyxl")
 
-    config: Dict[str, float] = {}
-    if "Setting" in cfg_df.columns and "Value" in cfg_df.columns:
-        for _, r in cfg_df.iterrows():
-            k = str(r.get("Setting", "")).strip()
-            if not k:
-                continue
-            v = r.get("Value", None)
-            try:
-                config[k] = float(v)
-            except Exception:
-                # Non-numeric config entries are ignored in MVP
-                continue
+    # Read Config if present (supports numeric + string overrides)
+    config: Dict[str, Any] = {}
+    cfg_sheet = _find_sheet(excel, preferred=None, candidates=["Config", "Configuratie", "Instellingen", "Settings"])
+    if cfg_sheet:
+        cfg_df = _read_sheet(excel_obj, cfg_sheet)
+        cfg_df = cfg_df.rename(columns={"setting": "Setting", "value": "Value"})
+        setting_col = _pick_first_col(cfg_df, ["Setting", "Instelling", "Key"])
+        value_col = _pick_first_col(cfg_df, ["Value", "Waarde"])
+        if setting_col and value_col:
+            for _, r in cfg_df.iterrows():
+                k = str(r.get(setting_col, "")).strip()
+                if not k:
+                    continue
+                v = r.get(value_col, None)
+                # Store raw; optimizer will parse numbers where needed.
+                config[k] = v
 
     # Provide deterministic defaults if not present
     config.setdefault("PEER_WEIGHT", 0.2)
     config.setdefault("BUYER_BOOST", 10.0)
 
-    # Rewind for subsequent reads if we used BytesIO
-    if isinstance(excel_obj, BytesIO):
-        excel_obj.seek(0)
+    # Resolve sheet names (allow overrides via Config keys)
+    # If the user provides these keys in Config, they will be used:
+    #  - HISTORY_CLIENT_SHEET, HISTORY_PEERS_SHEET, CURRENT_STOCK_SHEET, BUYER_RECS_SHEET
+    hc_sheet = _find_sheet(
+        excel,
+        preferred=str(config.get("HISTORY_CLIENT_SHEET", "")).strip() or None,
+        candidates=["History_Client", "Klanthistorie", "Klant historie", "Client history", "Historie klant"],
+    )
+    hp_sheet = _find_sheet(
+        excel,
+        preferred=str(config.get("HISTORY_PEERS_SHEET", "")).strip() or None,
+        candidates=["History_Peers", "Historie andere klanten", "Peer history", "Peers", "Andere klanten"],
+    )
+    buyer_sheet = _find_sheet(
+        excel,
+        preferred=str(config.get("BUYER_RECS_SHEET", "")).strip() or None,
+        candidates=["Buyer_Recs", "Aanbevolen assortiment", "Aanbevolen Assortiment", "Buyer", "Recommendations"],
+    )
+    stock_sheet = _find_sheet(
+        excel,
+        preferred=str(config.get("CURRENT_STOCK_SHEET", "")).strip() or None,
+        candidates=["Current_Stock", "Voorraad", "Stock", "Basis assortiment", "Basisassortiment", "Assortiment"],
+    )
 
-    hc = pd.read_excel(excel_obj, sheet_name="History_Client", engine="openpyxl")
-    if isinstance(excel_obj, BytesIO):
-        excel_obj.seek(0)
-    hp = pd.read_excel(excel_obj, sheet_name="History_Peers", engine="openpyxl")
-    if isinstance(excel_obj, BytesIO):
-        excel_obj.seek(0)
-    stock = pd.read_excel(excel_obj, sheet_name="Current_Stock", engine="openpyxl")
-    if isinstance(excel_obj, BytesIO):
-        excel_obj.seek(0)
-    buyer = pd.read_excel(excel_obj, sheet_name="Buyer_Recs", engine="openpyxl")
+    if not hc_sheet or not hp_sheet:
+        raise ValueError(
+            "Could not find required history sheets. Provide template sheet names or set HISTORY_CLIENT_SHEET / HISTORY_PEERS_SHEET in Config."
+        )
 
-    # Normalize column names
-    for df in (hc, hp):
-        df.columns = [str(c).strip() for c in df.columns]
-    stock.columns = [str(c).strip() for c in stock.columns]
-    buyer.columns = [str(c).strip() for c in buyer.columns]
+    # History sheets (autodetect columns; allow overrides)
+    hc_raw = _read_sheet(excel_obj, hc_sheet)
+    hp_raw = _read_sheet(excel_obj, hp_sheet)
 
-    # Date -> ISO week and aggregate
-    hc_week = _aggregate_qty_by_product_week(_to_week(hc, "Date"))
-    hp_week = _aggregate_qty_by_product_week(_to_week(hp, "Date"))
+    date_aliases = ["Date", "Orderdatum", "Verzenddatum", "Datum", "Verkoopdatum", "DateTime"]
+    qty_aliases = ["Qty", "Aantal", "Quantity", "Verkoopaantal", "Aantal stuks"]
+    product_aliases = ["Product", "Artikel", "Artikel nr", "Artikelnr", "Artikelnummer", "Omschrijving"]
 
-    # Normalize stock
-    stock = stock.copy()
-    stock["Product"] = stock["Product"].astype(str).str.strip()
-    if "StockLevel" in stock.columns:
-        stock["StockLevel"] = pd.to_numeric(stock["StockLevel"], errors="coerce").fillna(0)
+    hc_date = _override_or_detect(hc_raw, config.get("HISTORY_CLIENT_DATE_COL"), date_aliases)
+    hc_qty = _override_or_detect(hc_raw, config.get("HISTORY_CLIENT_QTY_COL"), qty_aliases)
+    hc_prod = _override_or_detect(hc_raw, config.get("HISTORY_CLIENT_PRODUCT_COL"), product_aliases)
+    if not (hc_date and hc_qty and hc_prod):
+        raise ValueError("Could not detect Date/Product/Qty columns for client history sheet.")
+
+    hp_date = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_DATE_COL"), date_aliases)
+    hp_qty = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_QTY_COL"), qty_aliases)
+    hp_prod = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_PRODUCT_COL"), product_aliases)
+    if not (hp_date and hp_qty and hp_prod):
+        raise ValueError("Could not detect Date/Product/Qty columns for peers history sheet.")
+
+    hc_norm = _extract_history_long(hc_raw, date_col=hc_date, product_col=hc_prod, qty_col=hc_qty)
+    hp_norm = _extract_history_long(hp_raw, date_col=hp_date, product_col=hp_prod, qty_col=hp_qty)
+
+    hc_week = _history_to_weekly(hc_norm)
+    hp_week = _history_to_weekly(hp_norm)
+
+    # Buyer recs
+    if buyer_sheet:
+        buyer_raw = _read_sheet(excel_obj, buyer_sheet)
+        buyer_product_col = _override_or_detect(buyer_raw, config.get("BUYER_RECS_PRODUCT_COL"), product_aliases)
+        if buyer_product_col:
+            buyer = buyer_raw[[buyer_product_col]].copy().rename(columns={buyer_product_col: "Product"})
+        else:
+            buyer = pd.DataFrame(columns=["Product"])
     else:
-        stock["StockLevel"] = 0
-    stock = stock[stock["Product"] != ""].reset_index(drop=True)
+        buyer = pd.DataFrame(columns=["Product"])
 
-    # Normalize buyer recs
-    buyer = buyer.copy()
-    buyer["Product"] = buyer["Product"].astype(str).str.strip()
+    buyer["Product"] = buyer["Product"].apply(_normalize_product_value)
     buyer = buyer[buyer["Product"] != ""].drop_duplicates(subset=["Product"]).reset_index(drop=True)
+
+    # Current stock / availability
+    stock_df: Optional[pd.DataFrame] = None
+    if stock_sheet:
+        stock_raw = _read_sheet(excel_obj, stock_sheet)
+        # If it already matches template, use it.
+        if "Product" in stock_raw.columns and "StockLevel" in stock_raw.columns:
+            stock_df = stock_raw[["Product", "StockLevel"]].copy()
+        else:
+            stock_df = _build_stock_from_assortment(stock_raw)
+
+    if stock_df is None:
+        # Fallback: build a "presence-only" stock list from products seen in histories.
+        # This keeps the workflow running, but should be documented to users.
+        products = sorted(set(hc_week["Product"].astype(str)) | set(hp_week["Product"].astype(str)))
+        stock_df = pd.DataFrame({"Product": products, "StockLevel": [1.0] * len(products)})
+        config.setdefault("STOCK_SOURCE", "fallback_presence_only")
+    else:
+        config.setdefault("STOCK_SOURCE", str(stock_sheet))
+
+    stock_df["Product"] = stock_df["Product"].apply(_normalize_product_value)
+    stock_df["StockLevel"] = pd.to_numeric(stock_df["StockLevel"], errors="coerce").fillna(0.0)
+    stock_df = stock_df[stock_df["Product"] != ""].reset_index(drop=True)
 
     return IngestedData(
         config=config,
         history_client_weekly=hc_week,
         history_peers_weekly=hp_week,
-        current_stock=stock,
+        current_stock=stock_df,
         buyer_recs=buyer,
     )
 

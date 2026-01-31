@@ -10,6 +10,21 @@ Upload an `.xlsx` file with **5 sheets**:
 4) `Current_Stock` (cols: `Product`, `StockLevel`)
 5) `Buyer_Recs` (cols: `Product`)
 
+### Existing export formats (best-effort autodetect)
+If you already have an ERP export, BloomCast will try to autodetect common Dutch/English names, e.g.:
+- **Sheets**: `klanthistorie`, `Historie andere klanten`, `Aanbevolen assortiment`, `Basis assortiment`
+- **Columns**:
+  - Date: `Date`, `Orderdatum`, `Datum`
+  - Product: `Product`, `Artikel`, `Artikel nr`, `Omschrijving`
+  - Qty: `Qty`, `Aantal`, `Quantity`
+  - Stock/availability: `StockLevel` / `Voorraad` or `Leverbaar`
+
+If autodetect fails, you can add overrides to the `Config` sheet:
+- `HISTORY_CLIENT_SHEET`, `HISTORY_PEERS_SHEET`, `CURRENT_STOCK_SHEET`, `BUYER_RECS_SHEET`
+- `HISTORY_CLIENT_DATE_COL`, `HISTORY_CLIENT_PRODUCT_COL`, `HISTORY_CLIENT_QTY_COL`
+- `HISTORY_PEERS_DATE_COL`, `HISTORY_PEERS_PRODUCT_COL`, `HISTORY_PEERS_QTY_COL`
+- `BUYER_RECS_PRODUCT_COL`
+
 ### Local run (API)
 
 ```bash

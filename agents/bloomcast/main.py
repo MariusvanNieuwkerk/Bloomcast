@@ -98,7 +98,11 @@ def run_bloomcast(
       input → analyze/optimize → PDF bytes + analysis JSON
     """
     ingested: IngestedData = ingest_client_data(input_xlsx_bytes)
-    week = current_iso_week()
+    # Allow overriding the target week for repeatable runs.
+    try:
+        week = int(ingested.config.get("TARGET_ISO_WEEK") or ingested.config.get("WEEK_NUMBER") or current_iso_week())
+    except Exception:
+        week = current_iso_week()
     optimizer = BloomCastOptimizer(current_week=week)
     optimized = optimizer.optimize(ingested)
 
@@ -113,6 +117,7 @@ def run_bloomcast(
     decisions: list[str] = [
         "Pure Data Edition: no weather/holiday logic applied.",
         f"PEER_WEIGHT={ingested.config.get('PEER_WEIGHT')}, BUYER_BOOST={ingested.config.get('BUYER_BOOST')}.",
+        f"Stock source: {ingested.config.get('STOCK_SOURCE', 'unknown')}.",
         f"Rows proposed: {int(len(optimized))}.",
     ]
     action_items: list[dict[str, str]] = []
