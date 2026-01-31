@@ -127,6 +127,11 @@ async def run(
     input_name: Optional[str] = Form(None),
     input_mime: Optional[str] = Form(None),
     input_size: Optional[int] = Form(None),
+    # Compatibility aliases (some clients send camelCase)
+    inputUrl: Optional[str] = Form(None),
+    inputName: Optional[str] = Form(None),
+    inputMime: Optional[str] = Form(None),
+    inputSize: Optional[int] = Form(None),
     # Optional behavior
     return_pdf_base64: Optional[bool] = Form(False),
     # Required Taskyard headers
@@ -150,6 +155,11 @@ async def run(
     # Determine input source
     file_obj = input_file or transcript_file
     text_val = input_text if input_text is not None else transcript_text
+    # Normalize input_url fields (snake_case preferred, fall back to camelCase)
+    input_url = input_url or inputUrl
+    input_name = input_name or inputName
+    input_mime = input_mime or inputMime
+    input_size = input_size if input_size is not None else inputSize
 
     input_xlsx_bytes: Optional[bytes] = None
     payload_sha256: Optional[str] = None
@@ -216,7 +226,10 @@ async def run(
             content={"error": "Text input is not supported for Pure Data Edition. Please upload an .xlsx file."},
         )
     else:
-        return JSONResponse(status_code=422, content={"error": "Missing input_file/input_url"})
+        return JSONResponse(
+            status_code=422,
+            content={"error": "Missing input. Provide input_file (.xlsx) or input_url."},
+        )
 
     # Signature verification
     try:
