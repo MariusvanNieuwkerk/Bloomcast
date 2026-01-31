@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -12,6 +12,7 @@ from data_ingestor import IngestedData, current_iso_week
 @dataclass(frozen=True)
 class ProposalRow:
     product: str
+    product_name: str
     base: float
     peer_avg: float
     peer_gap: float
@@ -65,6 +66,15 @@ class BloomCastOptimizer:
 
         buyer_set = set(ingested.buyer_recs["Product"].astype(str).str.strip().tolist())
 
+        name_map: Dict[str, str] = {}
+        try:
+            cat = ingested.product_catalog.copy()
+            cat["Product"] = cat["Product"].astype(str).str.strip()
+            cat["ProductName"] = cat["ProductName"].astype(str).str.strip()
+            name_map = dict(zip(cat["Product"], cat["ProductName"]))
+        except Exception:
+            name_map = {}
+
         # Candidate products: union of history products (client+peers)
         products = set(client_avg_map.keys()) | set(peer_avg_map.keys())
         rows: list[ProposalRow] = []
@@ -96,6 +106,7 @@ class BloomCastOptimizer:
             rows.append(
                 ProposalRow(
                     product=product,
+                    product_name=name_map.get(product, ""),
                     base=base,
                     peer_avg=peer_avg,
                     peer_gap=peer_gap,

@@ -16,6 +16,7 @@ class IngestedData:
     history_peers_weekly: pd.DataFrame
     current_stock: pd.DataFrame
     buyer_recs: pd.DataFrame
+    product_catalog: pd.DataFrame  # cols: Product, ProductName
 
 
 def _norm(s: str) -> str:
@@ -133,6 +134,24 @@ def _extract_history_long(df: pd.DataFrame, *, date_col: str, product_col: str, 
     out = df[[date_col, product_col, qty_col]].copy()
     out = out.rename(columns={date_col: "Date", product_col: "Product", qty_col: "Qty"})
     out["Product"] = out["Product"].apply(_normalize_product_value)
+    return out
+
+
+def _extract_product_catalog(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Best-effort extraction of (Product, ProductName) from any sheet containing an ID and an Omschrijving/Description.
+    """
+    product_col = _pick_first_col(df, ["Product", "Artikel", "Artikel nr", "Artikelnr", "Artikelnummer"])
+    name_col = _pick_first_col(df, ["Omschrijving", "ProductName", "Product name", "Description"])
+    if not product_col or not name_col:
+        return pd.DataFrame(columns=["Product", "ProductName"])
+
+    out = df[[product_col, name_col]].copy()
+    out = out.rename(columns={product_col: "Product", name_col: "ProductName"})
+    out["Product"] = out["Product"].apply(_normalize_product_value)
+    out["ProductName"] = out["ProductName"].astype(str).str.strip()
+    out = out[(out["Product"] != "") & (out["ProductName"] != "")]
+    out = out.drop_duplicates(subset=["Product"], keep="first").reset_index(drop=True)
     return out
 
 
@@ -286,8 +305,10 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
 
     # Current stock / availability
     stock_df: Optional[pd.DataFrame] = None
+    stock_catalog = pd.DataFrame(columns=["Product", "ProductName"])
     if stock_sheet:
         stock_raw = _read_sheet(excel_obj, stock_sheet)
+        stock_catalog = _extract_product_catalog(stock_raw)
         # If it already matches template, use it.
         if "Product" in stock_raw.columns and "StockLevel" in stock_raw.columns:
             stock_df = stock_raw[["Product", "StockLevel"]].copy()
@@ -307,12 +328,30 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     stock_df["StockLevel"] = pd.to_numeric(stock_df["StockLevel"], errors="coerce").fillna(0.0)
     stock_df = stock_df[stock_df["Product"] != ""].reset_index(drop=True)
 
+    # Build product catalog (prefer stock sheet names, then client history, then peers)
+    catalog_client = _extract_product_catalog(hc_raw)
+    catalog_peers = _extract_product_catalog(hp_raw)
+    catalog_buyer = pd.DataFrame(columns=["Product", "ProductName"])
+    if buyer_sheet:
+        try:
+            buyer_raw = _read_sheet(excel_obj, buyer_sheet)
+            catalog_buyer = _extract_product_catalog(buyer_raw)
+        except Exception:
+            catalog_buyer = pd.DataFrame(columns=["Product", "ProductName"])
+
+    combined = pd.concat([stock_catalog, catalog_client, catalog_peers, catalog_buyer], ignore_index=True)
+    combined["Product"] = combined["Product"].apply(_normalize_product_value)
+    combined["ProductName"] = combined["ProductName"].astype(str).str.strip()
+    combined = combined[(combined["Product"] != "") & (combined["ProductName"] != "")]
+    combined = combined.drop_duplicates(subset=["Product"], keep="first").reset_index(drop=True)
+
     return IngestedData(
         config=config,
         history_client_weekly=hc_week,
         history_peers_weekly=hp_week,
         current_stock=stock_df,
         buyer_recs=buyer,
+        product_catalog=combined,
     )
 
 

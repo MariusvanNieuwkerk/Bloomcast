@@ -41,9 +41,10 @@ def generate_bloomcast_pdf_report(
     pdf.cell(0, 7, "Order Proposal (Deterministic)", ln=True)
 
     columns = [
-        ("product", 45, "Product"),
-        ("stock_level", 20, "Stock"),
-        ("total", 18, "Proposal"),
+        ("product", 18, "Art"),
+        ("product_name", 55, "Product"),
+        ("stock_level", 14, "Avail"),
+        ("total", 16, "Proposal"),
         ("breakdown", 0, "Calculation Breakdown"),
     ]
 
@@ -74,7 +75,12 @@ def generate_bloomcast_pdf_report(
                 w = 190 - sum(c[1] for c in columns if c[1] > 0)
             text = cell_text(row.get(key, ""))
             # Keep the table stable by truncating long text in cells (MVP).
-            max_len = 120 if key == "breakdown" else 50
+            if key == "breakdown":
+                max_len = 120
+            elif key == "product_name":
+                max_len = 60
+            else:
+                max_len = 50
             pdf.cell(w, 6, text[:max_len], border=1)
         pdf.ln()
 
@@ -106,6 +112,20 @@ def run_bloomcast(
     optimizer = BloomCastOptimizer(current_week=week)
     optimized = optimizer.optimize(ingested)
 
+    # Present a focused buying proposal (default: top 60 products).
+    try:
+        top_n = int(ingested.config.get("PROPOSAL_TOP_N") or 60)
+    except Exception:
+        top_n = 60
+    if top_n < 1:
+        top_n = 60
+
+    if not optimized.empty:
+        # Prefer only meaningful proposals; keep list compact for buyers.
+        if "total" in optimized.columns:
+            optimized = optimized[optimized["total"] > 0].copy()
+        optimized = optimized.sort_values(["total", "product"], ascending=[False, True]).head(top_n).reset_index(drop=True)
+
     pdf_bytes = generate_bloomcast_pdf_report(
         optimized_df=optimized,
         week=week,
@@ -118,7 +138,7 @@ def run_bloomcast(
         "Pure Data Edition: no weather/holiday logic applied.",
         f"PEER_WEIGHT={ingested.config.get('PEER_WEIGHT')}, BUYER_BOOST={ingested.config.get('BUYER_BOOST')}.",
         f"Stock source: {ingested.config.get('STOCK_SOURCE', 'unknown')}.",
-        f"Rows proposed: {int(len(optimized))}.",
+        f"Rows proposed: {int(len(optimized))} (top {top_n}).",
     ]
     action_items: list[dict[str, str]] = []
     if not optimized.empty:
@@ -126,7 +146,7 @@ def run_bloomcast(
             action_items.append(
                 {
                     "who": "Buyer",
-                    "what": f"Place order proposal for {r.get('product')}: {int(r.get('total', 0))} units.",
+                    "what": f"Place order proposal: {r.get('product')} {r.get('product_name','')}".strip() + f" = {int(r.get('total', 0))} units.",
                     "deadline": "This week",
                 }
             )
