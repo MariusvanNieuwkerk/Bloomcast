@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import json
+import traceback
+import uuid
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from typing import Optional
@@ -327,7 +329,31 @@ async def run(
     if input_xlsx_bytes is None:
         return JSONResponse(status_code=422, content={"error": "Missing input (.xlsx). Provide input_file or input_url."})
 
-    pdf_bytes, analysis = run_bloomcast(job_id=job_id, input_xlsx_bytes=input_xlsx_bytes)
+    try:
+        pdf_bytes, analysis = run_bloomcast(job_id=job_id, input_xlsx_bytes=input_xlsx_bytes)
+    except ValueError as e:
+        # Most common: missing sheets/columns or unexpected Excel shape.
+        # Return a 422 so Taskyard shows it as a user-fixable input issue.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "Invalid input Excel format",
+                "details": str(e),
+                "hint": "Check sheet/column names (Date/Product/Qty) or provide overrides in the Config sheet.",
+            },
+        )
+    except Exception as e:
+        # Unexpected: log full traceback for debugging, return a safe error to caller.
+        error_id = str(uuid.uuid4())
+        print(f"[bloomcast] error_id={error_id} unhandled exception: {type(e).__name__}: {e}")
+        print(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Internal server error",
+                "error_id": error_id,
+            },
+        )
     pdf_sha = sha256_hex(pdf_bytes)
 
     storage: dict = {"upload_used": False}
