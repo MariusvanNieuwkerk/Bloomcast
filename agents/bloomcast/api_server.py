@@ -331,6 +331,16 @@ async def run(
 
     try:
         pdf_bytes, analysis = run_bloomcast(job_id=job_id, input_xlsx_bytes=input_xlsx_bytes)
+    except UnicodeEncodeError as e:
+        # FPDF (latin-1) can choke on some unicode chars if they slip through.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "PDF encoding error",
+                "details": str(e),
+                "hint": "One of the product names contains unsupported characters for the PDF font. This should be fixed by normalizing text before rendering.",
+            },
+        )
     except ValueError as e:
         # Most common: missing sheets/columns or unexpected Excel shape.
         # Return a 422 so Taskyard shows it as a user-fixable input issue.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import unicodedata
 from typing import Any
 
 import pandas as pd
@@ -11,12 +12,27 @@ from logic_engine import BloomCastOptimizer
 from utils import sha256_hex
 
 
+def _pdf_safe_text(text: Any) -> str:
+    """
+    FPDF (pyfpdf) is latin-1 based. Excel/product names may contain Unicode.
+    Make text deterministic + printable by:
+      - normalizing to NFKD
+      - stripping diacritics (combining marks)
+      - encoding to latin-1 with replacement for any remaining unsupported chars
+    """
+    s = "" if text is None else str(text)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def _wrap_text(pdf: FPDF, text: str, max_width_mm: float) -> list[str]:
     """
     Basic word-wrapping using FPDF string width.
     Returns at least one line.
     """
-    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = _pdf_safe_text(text or "")
     t = " ".join(t.split())  # collapse whitespace
     if not t:
         return [""]
@@ -62,29 +78,29 @@ def generate_bloomcast_pdf_report(
 
     # Header / branding
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "BloomCast Weekly Forecast", ln=True)
+    pdf.cell(0, 10, _pdf_safe_text("BloomCast Weekly Forecast"), ln=True)
     pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, f"Week: {week}  |  Gegenereerd: {now.strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.cell(0, 6, _pdf_safe_text(f"Week: {week}  |  Gegenereerd: {now.strftime('%Y-%m-%d %H:%M')}"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 6, "Kort voorstel: top producten om deze week te bestellen.", ln=True)
+    pdf.cell(0, 6, _pdf_safe_text("Kort voorstel: top producten om deze week te bestellen."), ln=True)
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(90, 90, 90)
     peer_weight = cfg.get("PEER_WEIGHT")
     buyer_boost = cfg.get("BUYER_BOOST")
-    pdf.cell(0, 5, f"Instellingen: peer-weging {peer_weight}  |  buyer-boost {buyer_boost}", ln=True)
-    pdf.cell(0, 5, "Uitleg (geldt voor alle producten):", ln=True)
-    pdf.cell(0, 5, "- Base = wat deze klant normaal verkoopt in deze week (historie)", ln=True)
-    pdf.cell(0, 5, "- Extra = als vergelijkbare klanten meer verkopen (peer-signaal)", ln=True)
-    pdf.cell(0, 5, "- Buyer tip = extra duwtje als het product is aanbevolen", ln=True)
+    pdf.cell(0, 5, _pdf_safe_text(f"Instellingen: peer-weging {peer_weight}  |  buyer-boost {buyer_boost}"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("Uitleg (geldt voor alle producten):"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("- Base = wat deze klant normaal verkoopt in deze week (historie)"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("- Extra = als vergelijkbare klanten meer verkopen (peer-signaal)"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("- Buyer tip = extra duwtje als het product is aanbevolen"), ln=True)
     stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
     if stock_mode == "availability":
-        pdf.cell(0, 5, "Let op: er zijn geen voorraad-aantallen in de export, alleen 'leverbaar'.", ln=True)
+        pdf.cell(0, 5, _pdf_safe_text("Let op: er zijn geen voorraad-aantallen in de export, alleen 'leverbaar'."), ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
     # Recommended orders table (deterministic)
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 7, "Bestelvoorstel", ln=True)
+    pdf.cell(0, 7, _pdf_safe_text("Bestelvoorstel"), ln=True)
 
     # Column widths in mm (A4 width ~210mm, margins 12mm => usable ~186mm).
     stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
@@ -114,7 +130,7 @@ def generate_bloomcast_pdf_report(
         pdf.set_font("Helvetica", "B", 9)
         for key, w, label in columns:
             width = remaining_w if w == 0 else w
-            pdf.cell(width, 7, label, border=1, align="C")
+            pdf.cell(width, 7, _pdf_safe_text(label), border=1, align="C")
         pdf.ln()
         pdf.set_font("Helvetica", "", 9)
 
@@ -122,8 +138,8 @@ def generate_bloomcast_pdf_report(
         if v is None:
             return ""
         if isinstance(v, float):
-            return f"{v:g}"
-        return str(v)
+            return _pdf_safe_text(f"{v:g}")
+        return _pdf_safe_text(str(v))
 
     draw_header()
 
