@@ -87,11 +87,18 @@ def generate_bloomcast_pdf_report(
     pdf.set_text_color(90, 90, 90)
     peer_weight = cfg.get("PEER_WEIGHT")
     buyer_boost = cfg.get("BUYER_BOOST")
-    pdf.cell(0, 5, _pdf_safe_text(f"Instellingen: peer-weging {peer_weight}  |  buyer-boost {buyer_boost}"), ln=True)
+    pdf.cell(
+        0,
+        5,
+        _pdf_safe_text(
+            f"Instellingen: correctiefactor vergelijkbare klanten {peer_weight}  |  vaste inkoper-toevoeging {buyer_boost}"
+        ),
+        ln=True,
+    )
     pdf.cell(0, 5, _pdf_safe_text("Uitleg (geldt voor alle producten):"), ln=True)
     pdf.cell(0, 5, _pdf_safe_text("- Base = wat deze klant normaal verkoopt in deze week (historie)"), ln=True)
-    pdf.cell(0, 5, _pdf_safe_text("- Extra = als vergelijkbare klanten meer verkopen (peer-signaal)"), ln=True)
-    pdf.cell(0, 5, _pdf_safe_text("- Buyer tip = extra duwtje als het product is aanbevolen"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("- Correctiefactor = extra op basis van verkoop bij vergelijkbare klanten"), ln=True)
+    pdf.cell(0, 5, _pdf_safe_text("- Inkoper-toevoeging = vaste extra toevoeging bij inkoper-aanbeveling"), ln=True)
     stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
     if stock_mode == "availability":
         pdf.cell(0, 5, _pdf_safe_text("Let op: er zijn geen voorraad-aantallen in de export, alleen 'leverbaar'."), ln=True)
@@ -151,12 +158,12 @@ def generate_bloomcast_pdf_report(
             reasons = []
             try:
                 if float(row.get("peer_adjustment", 0) or 0) > 0:
-                    reasons.append("Populair bij vergelijkbare klanten")
+                    reasons.append("Correctiefactor (vergelijkbare klanten)")
             except Exception:
                 pass
             try:
                 if float(row.get("buyer_boost", 0) or 0) > 0:
-                    reasons.append("Aanbevolen door buyer")
+                    reasons.append("Inkoper-aanbeveling")
             except Exception:
                 pass
             return " + ".join(reasons) if reasons else "Normale verkoop"
