@@ -137,6 +137,24 @@ def _extract_history_long(df: pd.DataFrame, *, date_col: str, product_col: str, 
     return out
 
 
+def _extract_peers_history_long(
+    df: pd.DataFrame, *, date_col: str, product_col: str, qty_col: str, peer_col: Optional[str]
+) -> pd.DataFrame:
+    cols = [date_col, product_col, qty_col]
+    if peer_col:
+        cols.append(peer_col)
+    out = df[cols].copy()
+    rename_map = {date_col: "Date", product_col: "Product", qty_col: "Qty"}
+    if peer_col:
+        rename_map[peer_col] = "Peer"
+    out = out.rename(columns=rename_map)
+    out["Product"] = out["Product"].apply(_normalize_product_value)
+    if "Peer" in out.columns:
+        out["Peer"] = out["Peer"].astype(str).str.strip()
+        out = out[out["Peer"] != ""]
+    return out
+
+
 def _extract_product_catalog(df: pd.DataFrame) -> pd.DataFrame:
     """
     Best-effort extraction of (Product, ProductName) from any sheet containing an ID and an Omschrijving/Description.
@@ -159,6 +177,29 @@ def _history_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     # Normalized columns expected: Date, Product, Qty
     weekly = _aggregate_qty_by_product_week(_to_week(df, "Date"))
     return weekly
+
+
+def _peers_history_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalized columns expected: Date, Product, Qty, optional Peer.
+    If Peer exists, keep it so we can compute a true peer average per customer.
+    """
+    out = df.copy()
+    out = _to_week(out, "Date")
+    out["Qty"] = pd.to_numeric(out["Qty"], errors="coerce").fillna(0)
+    out["Product"] = out["Product"].apply(_normalize_product_value)
+    out = out[out["Product"] != ""]
+    if "Peer" in out.columns:
+        out["Peer"] = out["Peer"].astype(str).str.strip()
+        out = out[out["Peer"] != ""]
+        agg = (
+            out.groupby(["Product", "Peer", "IsoYear", "IsoWeek"], as_index=False)["Qty"]
+            .sum()
+            .sort_values(["Product", "Peer", "IsoYear", "IsoWeek"])
+            .reset_index(drop=True)
+        )
+        return agg
+    return _aggregate_qty_by_product_week(out)
 
 
 def _build_stock_from_assortment(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -200,6 +241,29 @@ def _build_stock_from_assortment(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return out[["Product", "StockLevel"]].reset_index(drop=True)
 
     return None
+
+
+def _looks_like_availability(series: pd.Series) -> bool:
+    """
+    Heuristic: treat as availability if it's basically boolean/0/1.
+    This prevents showing a voorraadkolom full of '1' when the export only has leverbaarheid.
+    """
+    try:
+        if series.dtype == bool:
+            return True
+    except Exception:
+        pass
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return False
+    # If almost everything is 0/1, assume it's availability.
+    unique = set(s.unique().tolist())
+    if unique.issubset({0, 1}):
+        return True
+    # Some exports encode availability as 0/1 floats with noise; be conservative.
+    if s.min() >= 0 and s.max() <= 1 and (s.round().isin([0, 1]).mean() >= 0.98):
+        return True
+    return False
 
 
 def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
@@ -282,6 +346,20 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     date_aliases = ["Date", "Orderdatum", "Verzenddatum", "Datum", "Verkoopdatum", "DateTime"]
     qty_aliases = ["Qty", "Aantal", "Quantity", "Verkoopaantal", "Aantal stuks"]
     product_aliases = ["Product", "Artikel", "Artikel nr", "Artikelnr", "Artikelnummer", "Omschrijving"]
+    peer_aliases = [
+        "Peer",
+        "Klant",
+        "Klantnaam",
+        "Klant nr",
+        "Klantnr",
+        "Debiteur",
+        "Debiteurnr",
+        "Customer",
+        "CustomerName",
+        "Customer No",
+        "CustomerNo",
+        "Account",
+    ]
 
     hc_date = _override_or_detect(hc_raw, config.get("HISTORY_CLIENT_DATE_COL"), date_aliases)
     hc_qty = _override_or_detect(hc_raw, config.get("HISTORY_CLIENT_QTY_COL"), qty_aliases)
@@ -292,14 +370,15 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     hp_date = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_DATE_COL"), date_aliases)
     hp_qty = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_QTY_COL"), qty_aliases)
     hp_prod = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_PRODUCT_COL"), product_aliases)
+    hp_peer = _override_or_detect(hp_raw, config.get("HISTORY_PEERS_PEER_COL"), peer_aliases)
     if not (hp_date and hp_qty and hp_prod):
         raise ValueError("Could not detect Date/Product/Qty columns for peers history sheet.")
 
     hc_norm = _extract_history_long(hc_raw, date_col=hc_date, product_col=hc_prod, qty_col=hc_qty)
-    hp_norm = _extract_history_long(hp_raw, date_col=hp_date, product_col=hp_prod, qty_col=hp_qty)
+    hp_norm = _extract_peers_history_long(hp_raw, date_col=hp_date, product_col=hp_prod, qty_col=hp_qty, peer_col=hp_peer)
 
     hc_week = _history_to_weekly(hc_norm)
-    hp_week = _history_to_weekly(hp_norm)
+    hp_week = _peers_history_to_weekly(hp_norm)
 
     # Buyer recs
     if buyer_sheet:
@@ -336,12 +415,16 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
             ],
         )
         detected_avail_col = _pick_first_col(stock_raw, ["Leverbaar", "Available", "Beschikbaar"])
-        if detected_stock_qty_col:
+        if detected_stock_qty_col and not _looks_like_availability(stock_raw[detected_stock_qty_col]):
             config["STOCK_MODE"] = "quantity"
             config["STOCK_COL"] = detected_stock_qty_col
         elif detected_avail_col:
             config["STOCK_MODE"] = "availability"
             config["STOCK_COL"] = detected_avail_col
+        elif detected_stock_qty_col:
+            # Quantity-like column exists but behaves like 0/1 → treat as availability.
+            config["STOCK_MODE"] = "availability"
+            config["STOCK_COL"] = detected_stock_qty_col
         else:
             config["STOCK_MODE"] = "unknown"
 

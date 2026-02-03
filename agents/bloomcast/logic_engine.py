@@ -38,8 +38,18 @@ class BloomCastOptimizer:
     @staticmethod
     def _avg_for_week(history_weekly: pd.DataFrame, week: int) -> Dict[str, float]:
         """
-        history_weekly columns: Product, IsoYear, IsoWeek, Qty
-        Returns: product -> mean(Qty over IsoYear) for the given IsoWeek
+        history_weekly columns:
+          - Client history: Product, IsoYear, IsoWeek, Qty
+          - Peer history (preferred): Product, Peer, IsoYear, IsoWeek, Qty
+
+        Returns:
+          - Client: product -> mean(Qty over IsoYear) for the given IsoWeek
+          - Peers: product -> mean( per-peer mean(Qty over IsoYear) ) for the given IsoWeek
+
+        Rationale:
+          Peer exports often contain many "similar customers". If we aggregate peers as a total,
+          the "peer signal" grows with the number of peers and inflates proposals. We therefore
+          compute an average per peer customer first, then average across peers.
         """
         df = history_weekly.copy()
         df["IsoWeek"] = pd.to_numeric(df["IsoWeek"], errors="coerce").fillna(-1).astype(int)
@@ -48,6 +58,16 @@ class BloomCastOptimizer:
         df = df[(df["IsoWeek"] == int(week)) & (df["Product"] != "")]
         if df.empty:
             return {}
+        if "Peer" in df.columns:
+            df["Peer"] = df["Peer"].astype(str).str.strip()
+            df = df[df["Peer"] != ""]
+            if df.empty:
+                return {}
+            # Mean per peer (across years), then mean across peers.
+            per_peer = df.groupby(["Product", "Peer"], as_index=False)["Qty"].mean()
+            avg = per_peer.groupby("Product")["Qty"].mean().to_dict()
+            return {str(k): float(v) for k, v in avg.items()}
+
         avg = df.groupby("Product")["Qty"].mean().to_dict()
         return {str(k): float(v) for k, v in avg.items()}
 
