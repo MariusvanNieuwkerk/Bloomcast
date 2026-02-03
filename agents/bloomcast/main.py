@@ -64,22 +64,21 @@ def generate_bloomcast_pdf_report(
     pdf.set_font("Helvetica", "B", 18)
     pdf.cell(0, 10, "BloomCast Weekly Forecast", ln=True)
     pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, f"Week: {week}  |  Generated: {now.strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.cell(0, 6, f"Week: {week}  |  Gegenereerd: {now.strftime('%Y-%m-%d %H:%M')}", ln=True)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, "Kort voorstel: top producten om deze week te bestellen.", ln=True)
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(90, 90, 90)
     peer_weight = cfg.get("PEER_WEIGHT")
     buyer_boost = cfg.get("BUYER_BOOST")
-    pdf.cell(
-        0,
-        5,
-        f"Rekenregel (voor alle regels): Proposal = Base + max(0, PeerAvg - Base) * {peer_weight} + BuyerBoost({buyer_boost})",
-        ln=True,
-    )
+    pdf.cell(0, 5, f"Instellingen: peer-weging {peer_weight}  |  buyer-boost {buyer_boost}", ln=True)
+    pdf.cell(0, 5, "Uitleg (geldt voor alle producten):", ln=True)
+    pdf.cell(0, 5, "- Base = wat deze klant normaal verkoopt in deze week (historie)", ln=True)
+    pdf.cell(0, 5, "- Extra = als vergelijkbare klanten meer verkopen (peer-signaal)", ln=True)
+    pdf.cell(0, 5, "- Buyer tip = extra duwtje als het product is aanbevolen", ln=True)
     stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
     if stock_mode == "availability":
-        pdf.cell(0, 5, "Alleen leverbare producten zijn opgenomen (geen voorraad-aantallen in export).", ln=True)
+        pdf.cell(0, 5, "Let op: er zijn geen voorraad-aantallen in de export, alleen 'leverbaar'.", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
@@ -90,14 +89,14 @@ def generate_bloomcast_pdf_report(
     # Column widths in mm (A4 width ~210mm, margins 12mm => usable ~186mm).
     stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
     base_cols = [
-        ("product", 18.0, "Art"),
+        ("product", 18.0, "Artikel"),
         ("product_name", 70.0, "Product"),
     ]
     if stock_mode == "quantity":
-        base_cols.append(("stock_level", 14.0, "Stock"))
+        base_cols.append(("stock_level", 14.0, "Voorraad"))
     base_cols += [
-        ("total", 16.0, "Proposal"),
-        ("reason", 0.0, "Reason"),
+        ("total", 16.0, "Advies"),
+        ("reason", 0.0, "Waarom"),
     ]
     columns = base_cols
 
@@ -136,15 +135,15 @@ def generate_bloomcast_pdf_report(
             reasons = []
             try:
                 if float(row.get("peer_adjustment", 0) or 0) > 0:
-                    reasons.append("Peers higher")
+                    reasons.append("Populair bij vergelijkbare klanten")
             except Exception:
                 pass
             try:
                 if float(row.get("buyer_boost", 0) or 0) > 0:
-                    reasons.append("Buyer tip")
+                    reasons.append("Aanbevolen door buyer")
             except Exception:
                 pass
-            return " + ".join(reasons) if reasons else "Baseline"
+            return " + ".join(reasons) if reasons else "Normale verkoop"
         view["reason"] = view.apply(_reason, axis=1)
     for _, row in view.iterrows():
         # Build wrapped lines for each cell
