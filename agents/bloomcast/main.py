@@ -62,37 +62,48 @@ def generate_bloomcast_pdf_report(
 
     # Header / branding
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "BloomCast Weekly Forecast (Pure Data Edition)", ln=True)
+    pdf.cell(0, 10, "BloomCast Weekly Forecast", ln=True)
     pdf.set_font("Helvetica", "", 11)
     pdf.cell(0, 6, f"Week: {week}  |  Generated: {now.strftime('%Y-%m-%d %H:%M')}", ln=True)
-    pdf.cell(
-        0,
-        6,
-        f"Config: PEER_WEIGHT={cfg.get('PEER_WEIGHT')}  BUYER_BOOST={cfg.get('BUYER_BOOST')}",
-        ln=True,
-    )
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Kort voorstel: top producten om deze week te bestellen.", ln=True)
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(90, 90, 90)
-    pdf.cell(0, 5, "Avail: 1 = available/leverbaar, 0 = excluded", ln=True)
+    peer_weight = cfg.get("PEER_WEIGHT")
+    buyer_boost = cfg.get("BUYER_BOOST")
+    pdf.cell(
+        0,
+        5,
+        f"Rekenregel (voor alle regels): Proposal = Base + max(0, PeerAvg - Base) * {peer_weight} + BuyerBoost({buyer_boost})",
+        ln=True,
+    )
+    stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
+    if stock_mode == "availability":
+        pdf.cell(0, 5, "Alleen leverbare producten zijn opgenomen (geen voorraad-aantallen in export).", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
     # Recommended orders table (deterministic)
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 7, "Order Proposal (Deterministic)", ln=True)
+    pdf.cell(0, 7, "Bestelvoorstel", ln=True)
 
     # Column widths in mm (A4 width ~210mm, margins 12mm => usable ~186mm).
-    columns = [
+    stock_mode = str(cfg.get("STOCK_MODE") or "").strip().lower()
+    base_cols = [
         ("product", 18.0, "Art"),
-        ("product_name", 55.0, "Product"),
-        ("stock_level", 12.0, "Avail"),
-        ("total", 16.0, "Proposal"),
-        ("breakdown", 0.0, "Calculation Breakdown"),
+        ("product_name", 70.0, "Product"),
     ]
+    if stock_mode == "quantity":
+        base_cols.append(("stock_level", 14.0, "Stock"))
+    base_cols += [
+        ("total", 16.0, "Proposal"),
+        ("reason", 0.0, "Reason"),
+    ]
+    columns = base_cols
 
     usable_w = pdf.w - pdf.l_margin - pdf.r_margin
     fixed_w = sum(w for _, w, _ in columns if w > 0)
-    remaining_w = max(40.0, usable_w - fixed_w)  # ensure breakdown stays readable
+    remaining_w = max(40.0, usable_w - fixed_w)  # ensure reason stays readable
 
     def col_width(key: str) -> float:
         for k, w, _ in columns:
@@ -119,6 +130,22 @@ def generate_bloomcast_pdf_report(
 
     line_h = 5.0
     view = optimized_df.copy()
+    # Derive a short reason label per product (phone-friendly).
+    if "reason" not in view.columns:
+        def _reason(row):
+            reasons = []
+            try:
+                if float(row.get("peer_adjustment", 0) or 0) > 0:
+                    reasons.append("Peers higher")
+            except Exception:
+                pass
+            try:
+                if float(row.get("buyer_boost", 0) or 0) > 0:
+                    reasons.append("Buyer tip")
+            except Exception:
+                pass
+            return " + ".join(reasons) if reasons else "Baseline"
+        view["reason"] = view.apply(_reason, axis=1)
     for _, row in view.iterrows():
         # Build wrapped lines for each cell
         cell_lines: dict[str, list[str]] = {}
@@ -128,7 +155,7 @@ def generate_bloomcast_pdf_report(
             pad = 2.0
             text = cell_text(row.get(key, ""))
             # Wrap only for long-text cells; keep others single-line.
-            if key in {"breakdown", "product_name"}:
+            if key in {"product_name", "reason"}:
                 lines = _wrap_text(pdf, text, max_width_mm=max(5.0, width - pad))
             else:
                 lines = [text]
@@ -219,7 +246,7 @@ def run_bloomcast(
     # Build analysis payload for Taskyard response.
     summary = f"BloomCast computed a deterministic order proposal for ISO week {week} from the uploaded Excel file."
     decisions: list[str] = [
-        "Pure Data Edition: no weather/holiday logic applied.",
+        "Deterministic forecast: no weather/holiday logic applied.",
         f"PEER_WEIGHT={ingested.config.get('PEER_WEIGHT')}, BUYER_BOOST={ingested.config.get('BUYER_BOOST')}.",
         f"Stock source: {ingested.config.get('STOCK_SOURCE', 'unknown')}.",
         f"Rows proposed: {int(len(optimized))} (top {top_n}).",

@@ -168,7 +168,19 @@ def _build_stock_from_assortment(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
     leverbaar_col = _pick_first_col(df, ["Leverbaar", "Available", "Beschikbaar"])
-    stock_col = _pick_first_col(df, ["StockLevel", "Stock", "Voorraad", "Voorraadniveau"])
+    stock_col = _pick_first_col(
+        df,
+        [
+            "StockLevel",
+            "Stock",
+            "Voorraad",
+            "Voorraadniveau",
+            "Voorraad aanwezig",
+            "Beschikbare voorraad",
+            "Available stock",
+            "On hand",
+        ],
+    )
 
     out = pd.DataFrame()
     out["Product"] = df[product_col].apply(_normalize_product_value)
@@ -309,6 +321,30 @@ def ingest_client_data(filepath: Union[str, Path, bytes]) -> IngestedData:
     if stock_sheet:
         stock_raw = _read_sheet(excel_obj, stock_sheet)
         stock_catalog = _extract_product_catalog(stock_raw)
+        # Determine whether we have true quantities or only availability.
+        detected_stock_qty_col = _pick_first_col(
+            stock_raw,
+            [
+                "StockLevel",
+                "Stock",
+                "Voorraad",
+                "Voorraadniveau",
+                "Voorraad aanwezig",
+                "Beschikbare voorraad",
+                "Available stock",
+                "On hand",
+            ],
+        )
+        detected_avail_col = _pick_first_col(stock_raw, ["Leverbaar", "Available", "Beschikbaar"])
+        if detected_stock_qty_col:
+            config["STOCK_MODE"] = "quantity"
+            config["STOCK_COL"] = detected_stock_qty_col
+        elif detected_avail_col:
+            config["STOCK_MODE"] = "availability"
+            config["STOCK_COL"] = detected_avail_col
+        else:
+            config["STOCK_MODE"] = "unknown"
+
         # If it already matches template, use it.
         if "Product" in stock_raw.columns and "StockLevel" in stock_raw.columns:
             stock_df = stock_raw[["Product", "StockLevel"]].copy()
